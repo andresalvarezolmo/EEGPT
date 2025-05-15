@@ -1,0 +1,17 @@
+*.pkl
+*.edf
+*.pyc
+*.pth
+*.gxp-l4-0
+*.out
+*.ckpt
+*.zip
+*.lab
+*.htk
+*.rec
+*.htk
+*.list
+
+AAREADME.txt
+
+

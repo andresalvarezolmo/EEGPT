@@ -14,6 +14,14 @@ import torch
 from timm.utils import ModelEma
 import utils
 from einops import rearrange
+import numpy as np
+
+from sklearn.metrics import (
+    precision_score,
+    recall_score,
+    f1_score,
+    confusion_matrix,
+)
 
 def train_class_batch(model, samples, target, criterion, ch_names):
     
@@ -151,60 +159,170 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
     return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
 
 
+# @torch.no_grad()
+# def evaluate(data_loader, model, device, header='Test:', ch_names=None, metrics=['acc, f1_weighted'], is_binary=True):
+#     input_chans = None
+#     if ch_names is not None:
+#         input_chans = utils.get_input_chans(ch_names)
+#     if is_binary:
+#         criterion = torch.nn.BCEWithLogitsLoss()
+#     else:
+#         criterion = torch.nn.CrossEntropyLoss()
+
+#     metric_logger = utils.MetricLogger(delimiter="  ")
+#     #header = 'Test:'
+
+#     # switch to evaluation mode
+#     model.eval()
+#     pred = []
+#     true = []
+#     for step, batch in enumerate(metric_logger.log_every(data_loader, 10, header)):
+#         EEG = batch[0]
+#         target = batch[-1]
+#         EEG = EEG.float().to(device, non_blocking=True) / 100
+#         EEG = rearrange(EEG, 'B N (A T) -> B N A T', T=200)
+#         target = target.to(device, non_blocking=True)
+#         if is_binary:
+#             target = target.float().unsqueeze(-1)
+        
+#         # compute output
+#         with torch.cuda.amp.autocast():
+#             output = model(EEG)
+#             loss = criterion(output, target)
+        
+#         if is_binary:
+#             output = torch.sigmoid(output).cpu()
+#         else:
+#             output = output.cpu()
+#         target = target.cpu()
+
+#         results = utils.get_metrics(output.numpy(), target.numpy(), metrics, is_binary)
+#         pred.append(output)
+#         true.append(target)
+
+#         batch_size = EEG.shape[0]
+#         metric_logger.update(loss=loss.item())
+#         for key, value in results.items():
+#             metric_logger.meters[key].update(value, n=batch_size)
+#         #metric_logger.meters['acc5'].update(acc5.item(), n=batch_size)
+#     # gather the stats from all processes
+#     metric_logger.synchronize_between_processes()
+#     print('* loss {losses.global_avg:.3f}'
+#           .format(losses=metric_logger.loss))
+    
+#     pred = torch.cat(pred, dim=0).numpy()
+#     true = torch.cat(true, dim=0).numpy()
+
+#     ret = utils.get_metrics(pred, true, metrics, is_binary, 0.5)
+#     print("rettt", ret)
+#     ret['loss'] = metric_logger.loss.global_avg
+#     return ret
+
 @torch.no_grad()
-def evaluate(data_loader, model, device, header='Test:', ch_names=None, metrics=['acc'], is_binary=True):
+def evaluate(data_loader, model, device, header='Test:',
+             ch_names=None, metrics=['acc', 'f1_weighted'], is_binary=True):
+
+    # optional channel selection
     input_chans = None
     if ch_names is not None:
         input_chans = utils.get_input_chans(ch_names)
-    if is_binary:
-        criterion = torch.nn.BCEWithLogitsLoss()
-    else:
-        criterion = torch.nn.CrossEntropyLoss()
 
+    # loss
+    criterion = torch.nn.BCEWithLogitsLoss() if is_binary else torch.nn.CrossEntropyLoss()
+
+    # logger
     metric_logger = utils.MetricLogger(delimiter="  ")
-    #header = 'Test:'
-
-    # switch to evaluation mode
     model.eval()
-    pred = []
-    true = []
+
+    all_preds = []
+    all_trues = []
+
     for step, batch in enumerate(metric_logger.log_every(data_loader, 10, header)):
-        EEG = batch[0]
-        target = batch[-1]
+        EEG, target = batch[0], batch[-1]
+
+        # preprocess
         EEG = EEG.float().to(device, non_blocking=True) / 100
         EEG = rearrange(EEG, 'B N (A T) -> B N A T', T=200)
         target = target.to(device, non_blocking=True)
         if is_binary:
             target = target.float().unsqueeze(-1)
-        
-        # compute output
+
+        # forward + loss
         with torch.cuda.amp.autocast():
             output = model(EEG)
             loss = criterion(output, target)
-        
+
+        # move to CPU and apply activation
         if is_binary:
-            output = torch.sigmoid(output).cpu()
+            probs = torch.sigmoid(output).cpu().numpy().ravel()
         else:
-            output = output.cpu()
-        target = target.cpu()
+            logits = output.cpu().numpy()
+            probs = logits  # shape [B, C]
+        labs = target.cpu().numpy().ravel()
 
-        results = utils.get_metrics(output.numpy(), target.numpy(), metrics, is_binary)
-        pred.append(output)
-        true.append(target)
-
+        # per-batch logging of your existing metrics
+        results = utils.get_metrics(probs if is_binary else probs, labs, metrics, is_binary)
         batch_size = EEG.shape[0]
-        metric_logger.update(loss=loss.item())
+        metric_logger.update(loss=loss.item(), n=batch_size)
         for key, value in results.items():
             metric_logger.meters[key].update(value, n=batch_size)
-        #metric_logger.meters['acc5'].update(acc5.item(), n=batch_size)
-    # gather the stats from all processes
-    metric_logger.synchronize_between_processes()
-    print('* loss {losses.global_avg:.3f}'
-          .format(losses=metric_logger.loss))
-    
-    pred = torch.cat(pred, dim=0).numpy()
-    true = torch.cat(true, dim=0).numpy()
 
-    ret = utils.get_metrics(pred, true, metrics, is_binary, 0.5)
+        # store for epoch-level metrics
+        all_preds.append(probs)
+        all_trues.append(labs)
+
+    # end loop
+    metric_logger.synchronize_between_processes()
+    print('* loss {losses.global_avg:.3f}'.format(losses=metric_logger.loss))
+
+    # flatten
+    y_true = np.concatenate(all_trues)
+    if is_binary:
+        y_pred_labels = (np.concatenate(all_preds) >= 0.5).astype(int)
+    else:
+        # multiclass: take argmax over last dim
+        y_pred_labels = np.argmax(np.concatenate(all_preds, axis=0), axis=1)
+
+    # base ret from utils
+    pred_array = np.concatenate(all_preds, axis=0)
+    ret = utils.get_metrics(pred_array, y_true, metrics, is_binary, 0.5)
     ret['loss'] = metric_logger.loss.global_avg
+
+    # now append precision, sensitivity, f1, specificity
+    if is_binary:
+        average_type = 'binary'
+    else:
+        average_type = 'macro'
+
+    # precision, recall, f1
+    ret['precision']   = precision_score(y_true, y_pred_labels,
+                                         average=average_type,
+                                         zero_division=0)
+    ret['sensitivity'] = recall_score(y_true, y_pred_labels,
+                                      average=average_type,
+                                      zero_division=0)
+    ret['f1']          = f1_score(y_true, y_pred_labels,
+                                  average=average_type,
+                                  zero_division=0)
+
+    # specificity
+    cm = confusion_matrix(y_true, y_pred_labels)
+    if is_binary:
+        # cm = [[TN, FP], [FN, TP]]
+        TN, FP, FN, TP = cm.ravel()
+        ret['specificity'] = TN / (TN + FP) if (TN + FP) > 0 else 0.0
+    else:
+        # multiclass: macro‐average of per‐class specificity
+        spec_per_class = []
+        num_classes = cm.shape[0]
+        for i in range(num_classes):
+            TP = cm[i, i]
+            FP = cm[:, i].sum() - TP
+            FN = cm[i, :].sum() - TP
+            TN = cm.sum() - (TP + FP + FN)
+            spec_per_class.append(TN / (TN + FP) if (TN + FP) > 0 else 0.0)
+        ret['specificity'] = float(np.mean(spec_per_class))
+    
+    print(ret)
+
     return ret
