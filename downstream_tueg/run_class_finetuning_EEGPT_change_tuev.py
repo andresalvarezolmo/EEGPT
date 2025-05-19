@@ -488,13 +488,17 @@ def main(args, ds_init):
     if args.eval:
         balanced_accuracy = []
         accuracy = []
-        for data_loader in data_loader_test:
-            test_stats = evaluate(data_loader, model, device, header='Test:', ch_names=ch_names, metrics=metrics, is_binary=(args.nb_classes == 1))
-            accuracy.append(test_stats['accuracy'])
-            balanced_accuracy.append(test_stats['balanced_accuracy'])
-        print(f"======Accuracy: {np.mean(accuracy)} {np.std(accuracy)}, balanced accuracy: {np.mean(balanced_accuracy)} {np.std(balanced_accuracy)}")
+        # for data_loader in data_loader_test:
+        #     test_stats = evaluate(data_loader, model, device, header='Test:', ch_names=ch_names, metrics=metrics, is_binary=(args.nb_classes == 1))
+        #     accuracy.append(test_stats['accuracy'])
+        #     balanced_accuracy.append(test_stats['balanced_accuracy'])
+        test_stats = evaluate(data_loader_test, model, device, header='Test:', ch_names=ch_names, metrics=metrics, is_binary=args.nb_classes == 1)
+        print(f"Accuracy of the network on the {len(dataset_test)} test EEG: {test_stats['accuracy']:.2f}%")
+            
+        # print(f"======Accuracy: {np.mean(accuracy)} {np.std(accuracy)}, balanced accuracy: {np.mean(balanced_accuracy)} {np.std(balanced_accuracy)}")
         exit(0)
 
+        
     print(f"Start training for {args.epochs} epochs")
     start_time = time.time()
     max_accuracy = 0.0
